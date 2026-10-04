@@ -1,0 +1,20 @@
+# ripgrep / fd 等搜索工具的忽略规则（语法同 .gitignore）
+.git/
+.idea/
+.vscode/
+node_modules/
+dist/
+build/
+out/
+coverage/
+__pycache__/
+.venv/
+venv/
+target/
+vendor/
+logs/
+*.log
+*.lock
+.env
+.env.*
+!.env.example

@@ -1,0 +1,118 @@
+# CJ Agent Platform —— 本地开发依赖服务（MySQL + Redis + MinIO）
+#
+# 项目名固定为 cj-agent（否则默认取目录名 docker/，网络和卷会带上 docker_ 前缀）
+# 启动：docker compose -f docker/docker-compose.yml up -d
+# 停止：docker compose -f docker/docker-compose.yml down
+# 停止并清空数据：docker compose -f docker/docker-compose.yml down -v 后手动删除 docker/mysql-data、docker/redis-data、docker/minio-data
+#
+# 数据目录（宿主机 bind mount，已加入 .gitignore）：
+#   docker/mysql-data/   MySQL 数据文件
+#   docker/redis-data/   Redis AOF/RDB 文件
+#   docker/minio-data/   MinIO 对象数据
+# ⚠ 数据目录必须在容器启动前为空（或包含对应服务的既有数据），不要往里放无关文件。
+#
+# 注意：本机已有原生 MySQL 占用 3306，故这里把容器 3306 映射到宿主机 3307。
+#
+# 所有密码均可用环境变量覆盖，默认值仅供本地开发使用：
+#   MYSQL_ROOT_PASSWORD / REDIS_PASSWORD / MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
+# MySQL 账号统一为 root / root（见下方 environment 里的说明）
+
+name: cj-agent
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: cj-mysql
+    restart: unless-stopped
+    environment:
+      # 统一用 root / root 一个账号
+      # 注意：官方镜像不允许 MYSQL_USER=root（entrypoint 会直接报错退出），
+      # 因此这里只能通过 MYSQL_ROOT_PASSWORD 配 root，不能写 MYSQL_USER/MYSQL_PASSWORD
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      # 数据目录首次初始化时自动创建，未配置时固定使用 cj
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-cj}
+      # root 允许从任意主机连接，默认就是 %，这里显式写出来
+      MYSQL_ROOT_HOST: "%"
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+08:00
+      # 本地开发放开，方便用工具连库排查
+      - --default-authentication-plugin=mysql_native_password
+    ports:
+      - "3307:3306"
+    volumes:
+      # 数据落在宿主机 docker/mysql-data/，删除容器不丢数据
+      - ./mysql-data:/var/lib/mysql
+      # 首次启动时按文件名顺序执行的初始化脚本（目录不存在也不会报错）
+      - ./init/mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # 服务可连接且目标数据库已经创建后才标记为健康
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent && mysql -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --database=$$MYSQL_DATABASE -e 'SELECT 1' >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - cj-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: cj-redis
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis123456}
+      TZ: Asia/Shanghai
+    command:
+      - sh
+      - -c
+      - redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    ports:
+      - "6379:6379"
+    volumes:
+      # 数据落在宿主机 docker/redis-data/，删除容器不丢数据
+      - ./redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - cj-network
+
+  minio:
+    # 上游官方镜像已停止分发；使用兼容的 Silo 社区维护版本，并固定版本保证开发环境可复现。
+    image: docker.1ms.run/pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    container_name: cj-minio
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      TZ: Asia/Shanghai
+    command:
+      - server
+      - /data
+      - --console-address
+      - ":9001"
+    ports:
+      # S3 API
+      - "9000:9000"
+      # Web 管理控制台
+      - "9001:9001"
+    volumes:
+      # 数据落在宿主机 docker/minio-data/，删除容器不丢数据
+      - ./minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - cj-network
+
+networks:
+  cj-network:
+    driver: bridge
